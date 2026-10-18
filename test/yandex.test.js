@@ -90,6 +90,7 @@ before(async () => {
   await close(portProbe);
   config = loadConfig({
     APP_PORT: String(appPort),
+    HOST: '127.0.0.1', APP_URL: `http://localhost:${appPort}/`,
     AUTH_PROVIDER: 'yandex', SESSION_SECRET: randomBytes(32).toString('hex'),
     YANDEX_CLIENT_ID: clientId, YANDEX_CLIENT_SECRET: clientSecret,
   });
@@ -132,6 +133,7 @@ test('Yandex redirect uses OAuth code, PKCE, state and limited profile scopes', 
   assert.equal(authorizationUrl.searchParams.get('response_type'), 'code');
   assert.equal(authorizationUrl.searchParams.get('scope'), 'login:info login:email');
   assert.equal(authorizationUrl.searchParams.get('redirect_uri'), `${config.appUrl}/auth/callback`);
+  assert.equal(new URL(authorizationUrl.searchParams.get('redirect_uri')).hostname, 'localhost');
   assert.equal(authorizationUrl.searchParams.get('code_challenge_method'), 'S256');
   assert.equal(authorizationUrl.searchParams.get('force_confirm'), 'yes');
   assert.ok(authorizationUrl.searchParams.get('state'));
@@ -296,6 +298,7 @@ test('shelf mutations reject forged requests, unknown books and invalid statuses
   const browser = await reader('reader-security');
   assert.equal((await changeBook(browser, 'alice', 'planned', { 'x-csrf-token': 'forged' })).status, 403);
   assert.equal((await changeBook(browser, 'alice', 'planned', { origin: 'https://example.invalid' })).status, 403);
+  assert.equal((await changeBook(browser, 'alice', 'planned', { origin: `http://127.0.0.1:${config.appPort}` })).status, 403);
   assert.equal((await changeBook(browser, 'alice', 'planned', { origin: '' })).status, 403);
   assert.equal((await changeBook(browser, 'alice', 'anything')).status, 400);
   assert.equal((await changeBook(browser, 'unknown-book', 'planned')).status, 404);
