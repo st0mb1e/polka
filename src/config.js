@@ -25,7 +25,7 @@ export function loadConfig(env = process.env) {
     throw new Error('DEMO_PASSWORD должен содержать не менее 12 символов.');
   }
   return Object.freeze({
-    host: '127.0.0.1',
+    host: env.HOST?.trim() || '127.0.0.1',
     authProvider,
     yandexClientId: env.YANDEX_CLIENT_ID?.trim() || '',
     yandexClientSecret: env.YANDEX_CLIENT_SECRET?.trim() || '',
