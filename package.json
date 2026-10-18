@@ -1,0 +1,22 @@
+{
+  "name": "oauth-lab-auth-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Полка — простой сайт со списком книг и Яндекс OAuth 2.0",
+  "type": "module",
+  "engines": { "node": ">=22.20.0" },
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "start": "node scripts/start.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check": "node scripts/check.js"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "express-rate-limit": "8.7.1",
+    "express-session": "1.19.0",
+    "helmet": "8.3.0",
+    "oidc-provider": "9.12.2",
+    "openid-client": "6.8.8"
+  }
+}
