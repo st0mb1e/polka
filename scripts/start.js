@@ -10,10 +10,10 @@ try {
   console.log(`Веб-приложение: ${config.appUrl}`);
   if (config.authProvider === 'local') console.log(`Сервер авторизации: ${config.issuer}`);
   else {
-    console.log('Авторизация: Яндекс OAuth.');
-    if (!config.yandexClientId || !config.yandexClientSecret) {
-      console.log('Для включения входа заполните YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET в .env.');
-      console.log(`Redirect URI для Яндекса: ${config.appUrl}/auth/callback`);
+    console.log('Авторизация: Google OAuth / OpenID Connect.');
+    console.log(`Redirect URI для Google: ${config.appUrl}/auth/callback`);
+    if (!config.googleClientId || !config.googleClientSecret) {
+      console.log('Для включения входа заполните GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET в .env.');
     }
   }
   console.log('Для остановки нажмите Ctrl+C.');

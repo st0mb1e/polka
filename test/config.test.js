@@ -15,13 +15,30 @@ test('configuration rejects missing secrets, weak password and invalid ports', (
   assert.throws(() => loadConfig({ ...defaults, APP_PORT: '3000', AUTH_PORT: '3000' }), /должны отличаться/);
 });
 
-test('Yandex is the default and only requires the application session secret to start', () => {
+test('Google is the default and only requires the application session secret to start', () => {
   const config = loadConfig({ SESSION_SECRET: 's'.repeat(32) });
-  assert.equal(config.authProvider, 'yandex');
-  assert.equal(config.yandexClientId, '');
-  assert.equal(config.yandexClientSecret, '');
+  assert.equal(config.authProvider, 'google');
+  assert.equal(config.googleClientId, '');
+  assert.equal(config.googleClientSecret, '');
   assert.equal(config.clientSecret, undefined);
   assert.throws(() => loadConfig({ ...defaults, AUTH_PROVIDER: 'unknown' }), /AUTH_PROVIDER/);
+  assert.throws(() => loadConfig({ ...defaults, AUTH_PROVIDER: 'yandex' }), /GOOGLE_CLIENT_ID/);
+});
+
+test('configured Google clients require an HTTPS domain or a loopback redirect origin', () => {
+  const google = {
+    SESSION_SECRET: 's'.repeat(32), GOOGLE_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'secret',
+  };
+  for (const APP_URL of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000', 'https://polka.example']) {
+    assert.equal(loadConfig({ ...google, APP_URL }).appUrl, APP_URL);
+  }
+  for (const APP_URL of ['http://10.9.0.1:3000', 'https://10.9.0.1:3000', 'http://polka.example', 'https://polka']) {
+    assert.throws(() => loadConfig({ ...google, APP_URL }), /Google OAuth требует HTTPS-домен/);
+  }
+  assert.throws(() => loadConfig({ ...google, HOST: '10.9.0.1' }), /APP_URL/);
+  assert.equal(loadConfig({ ...google, HOST: '10.9.0.1', APP_URL: 'http://127.0.0.1:3000' }).host, '10.9.0.1');
+  assert.equal(loadConfig({ SESSION_SECRET: 's'.repeat(32), HOST: '10.9.0.1' }).appUrl, 'http://10.9.0.1:3000');
 });
 
 test('default bind host and public URLs use loopback addresses', () => {

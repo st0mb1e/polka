@@ -1,49 +1,48 @@
 import * as oidc from 'openid-client';
 
-export function createYandexProvider(config, { fetchImplementation = fetch } = {}) {
-  const configured = Boolean(config.yandexClientId && config.yandexClientSecret);
-  const client = configured ? new oidc.Configuration({
-    issuer: 'https://oauth.yandex.ru',
-    authorization_endpoint: 'https://oauth.yandex.ru/authorize',
-    token_endpoint: 'https://oauth.yandex.ru/token',
-  }, config.yandexClientId, config.yandexClientSecret, oidc.ClientSecretBasic(config.yandexClientSecret)) : undefined;
-  if (client) {
-    client[oidc.customFetch] = fetchImplementation;
-    client.timeout = 10;
+export function createGoogleProvider(config, { fetchImplementation = fetch } = {}) {
+  const configured = Boolean(config.googleClientId && config.googleClientSecret);
+  let client;
+  function getClient() {
+    if (!configured) throw new Error('Настройте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET в .env.');
+    // Discover lazily so public pages do not depend on Google's availability.
+    client ??= oidc.discovery(
+      new URL('https://accounts.google.com'), config.googleClientId,
+      { client_secret: config.googleClientSecret, id_token_signed_response_alg: 'RS256' },
+      oidc.ClientSecretPost(config.googleClientSecret),
+      { [oidc.customFetch]: fetchImplementation, execute: [oidc.enableNonRepudiationChecks], timeout: 10 },
+    ).catch((error) => { client = undefined; throw error; });
+    return client;
   }
 
   return {
-    name: 'yandex', configured, usesNonce: false,
+    name: 'google', configured, usesNonce: true,
     async authorizationUrl(pending) {
-      if (!configured) throw new Error('Настройте YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET в .env.');
-      return oidc.buildAuthorizationUrl(client, {
-        redirect_uri: `${config.appUrl}/auth/callback`, scope: 'login:info login:email',
-        state: pending.state, code_challenge: await oidc.calculatePKCECodeChallenge(pending.codeVerifier),
-        code_challenge_method: 'S256', force_confirm: 'yes',
+      return oidc.buildAuthorizationUrl(await getClient(), {
+        redirect_uri: `${config.appUrl}/auth/callback`, scope: 'openid profile email',
+        state: pending.state, nonce: pending.nonce,
+        code_challenge: await oidc.calculatePKCECodeChallenge(pending.codeVerifier),
+        code_challenge_method: 'S256', prompt: 'select_account',
       });
     },
     async authenticate(callbackUrl, pending) {
-      const tokens = await oidc.authorizationCodeGrant(client, callbackUrl, {
+      const tokens = await oidc.authorizationCodeGrant(await getClient(), callbackUrl, {
         pkceCodeVerifier: pending.codeVerifier, expectedState: pending.state,
+        expectedNonce: pending.nonce, idTokenExpected: true,
       });
-      // Yandex ID uses its own profile API rather than an OIDC UserInfo response.
-      const response = await fetchImplementation('https://login.yandex.ru/info?format=json', {
-        headers: { authorization: `OAuth ${tokens.access_token}`, accept: 'application/json' },
-        redirect: 'error', signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) throw new Error('Яндекс ID не вернул профиль пользователя.');
-      const profile = await response.json();
-      if (typeof profile.id !== 'string' || !profile.id || typeof profile.login !== 'string'
-        || !profile.login || profile.client_id !== config.yandexClientId) {
-        throw new Error('Яндекс ID вернул недопустимый профиль пользователя.');
+      const claims = tokens.claims();
+      if (typeof claims.sub !== 'string' || !claims.sub || typeof claims.email !== 'string'
+        || !claims.email || claims.email_verified !== true) {
+        throw new Error('Google не вернул подтверждённую учётную запись пользователя.');
       }
       return {
         user: {
-          sub: profile.id, username: profile.login,
-          name: profile.real_name || profile.display_name || profile.login,
-          email: typeof profile.default_email === 'string' ? profile.default_email : '',
+          sub: claims.sub, username: claims.email,
+          name: typeof claims.name === 'string' && claims.name ? claims.name : claims.email,
+          email: claims.email,
         },
-        expiresAt: Date.now() + Math.min(config.sessionLifetimeMs, (tokens.expires_in ?? 3600) * 1000),
+        expiresAt: Math.min(claims.exp * 1000, Date.now() + config.sessionLifetimeMs,
+          Date.now() + (tokens.expires_in ?? 3600) * 1000),
       };
     },
     logoutUrl() { return '/auth/logged-out'; },
@@ -51,7 +50,7 @@ export function createYandexProvider(config, { fetchImplementation = fetch } = {
 }
 
 export async function createOAuthProvider(config, options) {
-  if (config.authProvider === 'yandex') return createYandexProvider(config, options);
+  if (config.authProvider === 'google') return createGoogleProvider(config, options);
   const client = await oidc.discovery(
     new URL(config.issuer), config.clientId, config.clientSecret,
     oidc.ClientSecretBasic(config.clientSecret),

@@ -14,7 +14,9 @@ export async function createWebApp(config, providerOptions, { shelfStore = new S
   const provider = await createOAuthProvider(config, providerOptions);
   const app = express();
   const store = new session.MemoryStore();
-  const cookieOptions = { httpOnly: true, sameSite: 'lax', secure: false, path: '/' };
+  const https = new URL(config.appUrl).protocol === 'https:';
+  const cookieOptions = { httpOnly: true, sameSite: 'lax', secure: https, path: '/' };
+  if (https) app.set('trust proxy', 'loopback');
   app.disable('x-powered-by');
   app.use(securityHeaders(config));
   app.use('/assets', express.static(fileURLToPath(new URL('../public/', import.meta.url))));
@@ -98,7 +100,7 @@ export async function createWebApp(config, providerOptions, { shelfStore = new S
 
   app.get('/auth/login', async (req, res) => {
     if (!provider.configured) {
-      return res.status(503).send(errorPage('Вход временно недоступен', 'Подключение к Яндекс ID ещё не настроено администратором приложения.'));
+      return res.status(503).send(errorPage('Вход временно недоступен', 'Вход через Google ещё не настроен администратором приложения.'));
     }
     const returnTo = allowedReturnTo(req.query.returnTo);
     if (req.session?.user) return res.redirect(returnTo);
@@ -109,8 +111,14 @@ export async function createWebApp(config, providerOptions, { shelfStore = new S
     if (provider.usesNonce) pending.nonce = oidc.randomNonce();
     req.session.authRequest = pending;
     await saveSession(req);
-    const authorizationUrl = await provider.authorizationUrl(pending);
-    return res.redirect(authorizationUrl.href);
+    try {
+      const authorizationUrl = await provider.authorizationUrl(pending);
+      return res.redirect(authorizationUrl.href);
+    } catch {
+      delete req.session.authRequest;
+      await saveSession(req);
+      return res.status(503).send(errorPage('Вход временно недоступен', 'Не удалось связаться с сервером авторизации. Попробуйте позже.'));
+    }
   });
 
   app.get('/auth/callback', async (req, res) => {

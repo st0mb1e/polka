@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 function port(value, fallback, name) {
   const result = Number(value ?? fallback);
   if (!Number.isInteger(result) || result < 1024 || result > 65535) {
@@ -32,9 +34,9 @@ function publicOrigin(value, fallback, name) {
 }
 
 export function loadConfig(env = process.env) {
-  const authProvider = env.AUTH_PROVIDER || 'yandex';
-  if (!['local', 'yandex'].includes(authProvider)) {
-    throw new Error('AUTH_PROVIDER должен быть yandex или local.');
+  const authProvider = env.AUTH_PROVIDER || 'google';
+  if (!['local', 'google'].includes(authProvider)) {
+    throw new Error('AUTH_PROVIDER должен быть google или local. Для перехода с Яндекса укажите google и заполните GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET.');
   }
   const appPort = port(env.APP_PORT, 3000, 'APP_PORT');
   const authPort = port(env.AUTH_PORT, 3001, 'AUTH_PORT');
@@ -45,14 +47,25 @@ export function loadConfig(env = process.env) {
   const urlHost = addressHost.includes(':') && !addressHost.startsWith('[') ? `[${addressHost}]` : addressHost;
   const appUrl = publicOrigin(env.APP_URL, `http://${urlHost}:${appPort}`, 'APP_URL');
   const issuer = publicOrigin(env.AUTH_URL, `http://${urlHost}:${authPort}`, 'AUTH_URL');
+  const googleClientId = env.GOOGLE_CLIENT_ID?.trim() || '';
+  const googleClientSecret = env.GOOGLE_CLIENT_SECRET?.trim() || '';
+  if (authProvider === 'google' && googleClientId && googleClientSecret) {
+    const url = new URL(appUrl);
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    const loopback = hostname === 'localhost' || hostname === '::1'
+      || (isIP(hostname) === 4 && hostname.startsWith('127.'));
+    if (!loopback && (isIP(hostname) || url.protocol !== 'https:' || !hostname.includes('.'))) {
+      throw new Error('Google OAuth требует HTTPS-домен или localhost для адреса возврата. Укажите APP_URL с HTTPS-доменом либо http://127.0.0.1:3000 и используйте SSH-проброс порта. HOST может оставаться IP виртуальной машины.');
+    }
+  }
   if (authProvider === 'local' && (!env.DEMO_PASSWORD || env.DEMO_PASSWORD.length < 12)) {
     throw new Error('DEMO_PASSWORD должен содержать не менее 12 символов.');
   }
   return Object.freeze({
     host,
     authProvider,
-    yandexClientId: env.YANDEX_CLIENT_ID?.trim() || '',
-    yandexClientSecret: env.YANDEX_CLIENT_SECRET?.trim() || '',
+    googleClientId,
+    googleClientSecret,
     appPort,
     authPort,
     appUrl,

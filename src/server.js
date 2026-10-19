@@ -16,7 +16,7 @@ function closeServer(server) {
 }
 
 export async function startServers(config, appOptions) {
-  if (config.authProvider === 'yandex') {
+  if (config.authProvider === 'google') {
     const { app, store } = await createWebApp(config, undefined, appOptions);
     const appServer = await listen(app, config.appPort, config.host);
     return { appServer, store, async close() { await closeServer(appServer); } };

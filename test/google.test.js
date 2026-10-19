@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -13,19 +13,49 @@ import { ShelfStore, shelfUserKey } from '../src/shelf-store.js';
 let config;
 let appServer;
 let mockServer;
+let mockOrigin;
 let store;
 let shelfStore;
 let storageDirectory;
 let tokenRequests = 0;
 let tokenFailure = false;
-let profileFailure = false;
-let invalidProfile = false;
+let tokenMode = 'valid';
+let privateKey;
+let wrongPrivateKey;
 const codes = new Map();
-const accessTokens = new Set();
-const clientId = 'a'.repeat(32);
-const clientSecret = 'private-test-yandex-secret';
-const profile = { id: '123456789', login: 'student-yandex', real_name: 'Студент Яндекса', default_email: 'student@yandex.ru', client_id: clientId };
+const clientId = 'test-client.apps.googleusercontent.com';
+const clientSecret = 'private-test-google-secret';
+const profile = { sub: '123456789', name: 'Студент Google', email: 'student@gmail.com', email_verified: true };
 let activeProfile = profile;
+
+async function googleFetch(url, options) {
+  const target = new URL(url);
+  if (target.href === 'https://accounts.google.com/.well-known/openid-configuration') return fetch(`${mockOrigin}/discovery`, options);
+  if (target.href === 'https://oauth2.googleapis.com/token') return fetch(`${mockOrigin}/token`, options);
+  if (target.href === 'https://www.googleapis.com/oauth2/v3/certs') return fetch(`${mockOrigin}/certs`, options);
+  throw new Error(`Unexpected external request during test: ${target.origin}${target.pathname}`);
+}
+
+function createIdToken(code, accessToken) {
+  const now = Math.floor(Date.now() / 1000);
+  const claims = {
+    ...activeProfile, iss: 'https://accounts.google.com', aud: clientId, iat: now, exp: now + 1800,
+    nonce: code.nonce, at_hash: createHash('sha256').update(accessToken).digest().subarray(0, 16).toString('base64url'),
+  };
+  if (tokenMode === 'audience') claims.aud = 'another-client';
+  if (tokenMode === 'issuer') claims.iss = 'https://example.invalid';
+  if (tokenMode === 'expired') claims.exp = now - 120;
+  if (tokenMode === 'short-lived') claims.exp = now + 90;
+  if (tokenMode === 'nonce') claims.nonce = 'forged-nonce';
+  if (tokenMode === 'unverified-email') claims.email_verified = false;
+  if (tokenMode === 'missing-email') delete claims.email;
+  if (tokenMode === 'missing-subject') delete claims.sub;
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'google-test-key' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  const input = `${header}.${payload}`;
+  const signature = sign('RSA-SHA256', Buffer.from(input), tokenMode === 'signature' ? wrongPrivateKey : privateKey);
+  return `${input}.${signature.toString('base64url')}`;
+}
 
 function listen(app) {
   return new Promise((resolve, reject) => {
@@ -60,11 +90,22 @@ before(async () => {
   shelfStore = new ShelfStore(join(storageDirectory, 'shelves.json'));
   const mock = express();
   mock.use(express.urlencoded({ extended: false }));
+  const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  privateKey = keys.privateKey;
+  wrongPrivateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  const jwk = { ...keys.publicKey.export({ format: 'jwk' }), alg: 'RS256', use: 'sig', kid: 'google-test-key' };
+  mock.get('/discovery', (_req, res) => res.json({
+    issuer: 'https://accounts.google.com', authorization_endpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+    token_endpoint: 'https://oauth2.googleapis.com/token', jwks_uri: 'https://www.googleapis.com/oauth2/v3/certs',
+    response_types_supported: ['code'], subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'], token_endpoint_auth_methods_supported: ['client_secret_post'],
+    code_challenge_methods_supported: ['S256'],
+  }));
+  mock.get('/certs', (_req, res) => res.json({ keys: [jwk] }));
   mock.post('/token', (req, res) => {
     tokenRequests++;
-    const [encodedId, encodedSecret] = Buffer.from(req.get('authorization').slice(6), 'base64').toString().split(':');
-    assert.equal(decodeURIComponent(encodedId), clientId);
-    assert.equal(decodeURIComponent(encodedSecret), clientSecret);
+    assert.equal(req.body.client_id, clientId);
+    assert.equal(req.body.client_secret, clientSecret);
     assert.equal(req.body.grant_type, 'authorization_code');
     assert.equal(req.body.redirect_uri, `${config.appUrl}/auth/callback`);
     const code = codes.get(req.body.code);
@@ -72,36 +113,22 @@ before(async () => {
     if (tokenFailure || !code || actualChallenge !== code.challenge) return res.status(400).json({ error: 'invalid_grant' });
     codes.delete(req.body.code);
     const accessToken = `private-test-access-token-${req.body.code}`;
-    accessTokens.add(accessToken);
-    return res.json({ token_type: 'bearer', access_token: accessToken, expires_in: 1800 });
-  });
-  mock.get('/info', (req, res) => {
-    const token = req.get('authorization')?.replace(/^OAuth /, '');
-    assert.ok(accessTokens.has(token));
-    assert.equal(req.query.format, 'json');
-    assert.equal(req.query.oauth_token, undefined, 'Token must be in the header, not in the URL');
-    if (profileFailure) return res.status(401).json({ error: 'invalid_token' });
-    return res.json(invalidProfile ? { ...activeProfile, client_id: 'another-client' } : activeProfile);
+    return res.json({ token_type: 'bearer', access_token: accessToken, expires_in: 1800,
+      ...(tokenMode === 'missing-id-token' ? {} : { id_token: createIdToken(code, accessToken) }),
+    });
   });
   mockServer = await listen(mock);
-  const mockOrigin = `http://127.0.0.1:${mockServer.address().port}`;
+  mockOrigin = `http://127.0.0.1:${mockServer.address().port}`;
   const portProbe = await listen(express());
   const appPort = portProbe.address().port;
   await close(portProbe);
   config = loadConfig({
     APP_PORT: String(appPort),
     HOST: '127.0.0.1', APP_URL: `http://localhost:${appPort}/`,
-    AUTH_PROVIDER: 'yandex', SESSION_SECRET: randomBytes(32).toString('hex'),
-    YANDEX_CLIENT_ID: clientId, YANDEX_CLIENT_SECRET: clientSecret,
+    AUTH_PROVIDER: 'google', SESSION_SECRET: randomBytes(32).toString('hex'),
+    GOOGLE_CLIENT_ID: clientId, GOOGLE_CLIENT_SECRET: clientSecret,
   });
-  const { app: realApp, store: realStore } = await createWebApp(config, {
-    async fetchImplementation(url, options) {
-      const target = new URL(url);
-      if (target.origin === 'https://oauth.yandex.ru' && target.pathname === '/token') return fetch(`${mockOrigin}/token`, options);
-      if (target.origin === 'https://login.yandex.ru' && target.pathname === '/info') return fetch(`${mockOrigin}/info${target.search}`, options);
-      throw new Error('Unexpected external request during test');
-    },
-  }, { shelfStore });
+  const { app: realApp, store: realStore } = await createWebApp(config, { fetchImplementation: googleFetch }, { shelfStore });
   appServer = await new Promise((resolve, reject) => {
     const server = realApp.listen(new URL(config.appUrl).port, '127.0.0.1', () => resolve(server));
     server.once('error', reject);
@@ -110,38 +137,39 @@ before(async () => {
 });
 
 after(async () => { await Promise.all([close(appServer), close(mockServer)]); await rm(storageDirectory, { recursive: true, force: true }); });
-afterEach(() => { tokenFailure = false; profileFailure = false; invalidProfile = false; activeProfile = profile; });
+afterEach(() => { tokenFailure = false; tokenMode = 'valid'; activeProfile = profile; });
 
 async function begin(browser, returnTo = '/shelf') {
   const response = await browser.request(`${config.appUrl}/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
   assert.equal(response.status, 302);
   const authorizationUrl = new URL(response.headers.get('location'));
   const code = randomBytes(16).toString('hex');
-  codes.set(code, { challenge: authorizationUrl.searchParams.get('code_challenge') });
+  codes.set(code, { challenge: authorizationUrl.searchParams.get('code_challenge'), nonce: authorizationUrl.searchParams.get('nonce') });
   const callback = new URL(`${config.appUrl}/auth/callback`);
   callback.searchParams.set('code', code);
   callback.searchParams.set('state', authorizationUrl.searchParams.get('state'));
   return { authorizationUrl, callback };
 }
 
-test('Yandex redirect uses OAuth code, PKCE, state and limited profile scopes', async () => {
+test('Google redirect uses OAuth code, PKCE, state, nonce and limited profile scopes', async () => {
   const browser = new Browser();
   const { authorizationUrl } = await begin(browser);
-  assert.equal(authorizationUrl.origin, 'https://oauth.yandex.ru');
-  assert.equal(authorizationUrl.pathname, '/authorize');
+  assert.equal(authorizationUrl.origin, 'https://accounts.google.com');
+  assert.equal(authorizationUrl.pathname, '/o/oauth2/v2/auth');
   assert.equal(authorizationUrl.searchParams.get('client_id'), clientId);
   assert.equal(authorizationUrl.searchParams.get('response_type'), 'code');
-  assert.equal(authorizationUrl.searchParams.get('scope'), 'login:info login:email');
+  assert.equal(authorizationUrl.searchParams.get('scope'), 'openid profile email');
   assert.equal(authorizationUrl.searchParams.get('redirect_uri'), `${config.appUrl}/auth/callback`);
   assert.equal(new URL(authorizationUrl.searchParams.get('redirect_uri')).hostname, 'localhost');
   assert.equal(authorizationUrl.searchParams.get('code_challenge_method'), 'S256');
-  assert.equal(authorizationUrl.searchParams.get('force_confirm'), 'yes');
+  assert.equal(authorizationUrl.searchParams.get('prompt'), 'select_account');
+  assert.equal(authorizationUrl.searchParams.has('access_type'), false);
   assert.ok(authorizationUrl.searchParams.get('state'));
   assert.equal(authorizationUrl.searchParams.has('client_secret'), false);
-  assert.equal(authorizationUrl.searchParams.has('nonce'), false);
+  assert.ok(authorizationUrl.searchParams.get('nonce'));
 });
 
-test('Yandex callback exchanges code, loads profile, rotates session and hides tokens', async () => {
+test('Google callback validates a signed ID token, rotates the session and hides tokens', async () => {
   const browser = new Browser();
   const { callback } = await begin(browser);
   const previousCookie = browser.cookie;
@@ -151,10 +179,10 @@ test('Yandex callback exchanges code, loads profile, rotates session and hides t
   assert.notEqual(browser.cookie, previousCookie);
   const api = await browser.request(`${config.appUrl}/api/me`);
   assert.equal(api.status, 200);
-  assert.deepEqual(await api.json(), { user: { sub: profile.id, username: profile.login, name: profile.real_name, email: profile.default_email } });
+  assert.deepEqual(await api.json(), { user: { sub: profile.sub, username: profile.email, name: profile.name, email: profile.email } });
   for (const path of ['/', '/shelf', '/profile']) {
     const html = await (await browser.request(`${config.appUrl}${path}`)).text();
-    assert.match(html, /Студент Яндекса/);
+    assert.match(html, /Студент Google/);
     assert.ok(!html.includes('private-test-access-token'));
     assert.ok(!html.includes(clientSecret));
   }
@@ -167,7 +195,7 @@ test('Yandex callback exchanges code, loads profile, rotates session and hides t
   assert.equal((await browser.request(callback)).status, 400);
 });
 
-test('forged Yandex state is rejected before token exchange', async () => {
+test('forged Google state is rejected before token exchange', async () => {
   const browser = new Browser();
   const { callback } = await begin(browser);
   const count = tokenRequests;
@@ -177,7 +205,29 @@ test('forged Yandex state is rejected before token exchange', async () => {
   assert.equal((await browser.request(`${config.appUrl}/api/me`)).status, 401);
 });
 
-test('denying Yandex consent does not create a session', async () => {
+test('Google rejects an authorization code with a different PKCE challenge', async () => {
+  const browser = new Browser();
+  const { callback } = await begin(browser);
+  codes.get(callback.searchParams.get('code')).challenge = 'forged-challenge';
+  assert.equal((await browser.request(callback)).status, 400);
+  assert.equal((await browser.request(`${config.appUrl}/api/me`)).status, 401);
+});
+
+test('Google profile falls back to email when the name is absent and caps the session at ID token expiry', async () => {
+  activeProfile = { ...profile, name: undefined };
+  tokenMode = 'short-lived';
+  const browser = new Browser();
+  const { callback } = await begin(browser);
+  assert.equal((await browser.request(callback)).status, 302);
+  const { user } = await (await browser.request(`${config.appUrl}/api/me`)).json();
+  assert.equal(user.name, profile.email);
+  const signedCookie = decodeURIComponent(browser.cookie.slice('app.sid='.length));
+  const id = signedCookie.slice(2, signedCookie.lastIndexOf('.'));
+  const session = await promisify(store.get).call(store, id);
+  assert.ok(session.expiresAt <= Date.now() + 90_000);
+});
+
+test('denying Google consent does not create a session', async () => {
   const browser = new Browser();
   const { callback } = await begin(browser);
   callback.searchParams.delete('code');
@@ -188,9 +238,9 @@ test('denying Yandex consent does not create a session', async () => {
   assert.equal((await browser.request(`${config.appUrl}/api/me`)).status, 401);
 });
 
-test('Yandex token or profile errors and mismatched client ID keep private pages closed', async () => {
-  for (const failure of ['token', 'profile', 'client']) {
-    tokenFailure = failure === 'token'; profileFailure = failure === 'profile'; invalidProfile = failure === 'client';
+test('invalid Google tokens cannot authenticate a user', async () => {
+  for (const failure of ['token', 'audience', 'issuer', 'expired', 'nonce', 'signature', 'missing-id-token', 'unverified-email', 'missing-email', 'missing-subject']) {
+    tokenFailure = failure === 'token'; tokenMode = failure;
     const browser = new Browser();
     const { callback } = await begin(browser);
     assert.equal((await browser.request(callback)).status, 400);
@@ -198,7 +248,7 @@ test('Yandex token or profile errors and mismatched client ID keep private pages
   }
 });
 
-test('Yandex session logout is protected by CSRF and invalidates the previous cookie', async () => {
+test('Google session logout is protected by CSRF and invalidates the previous cookie', async () => {
   const browser = new Browser();
   const { callback } = await begin(browser);
   assert.equal((await browser.request(callback)).status, 302);
@@ -222,7 +272,7 @@ test('Yandex session logout is protected by CSRF and invalidates the previous co
   assert.ok(!loggedOutHtml.includes('Вы вышли из приложения и сервера авторизации'));
 });
 
-test('unconfigured Yandex mode serves public pages and refuses login without a local fallback', async () => {
+test('unconfigured Google mode serves public pages and refuses login without a local fallback', async () => {
   const { app } = await createWebApp(loadConfig({ SESSION_SECRET: 's'.repeat(32) }));
   const server = await listen(app);
   try {
@@ -230,7 +280,7 @@ test('unconfigured Yandex mode serves public pages and refuses login without a l
     const browser = new Browser();
     const page = await browser.request(origin);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Войти через Яндекс/);
+    assert.match(await page.text(), /Войти через Google/);
     const response = await browser.request(`${origin}/auth/login`);
     assert.equal(response.status, 503);
     assert.equal(response.headers.get('location'), null);
@@ -238,8 +288,49 @@ test('unconfigured Yandex mode serves public pages and refuses login without a l
   } finally { await close(server); }
 });
 
+test('Google discovery failure keeps public pages available and a later login retries discovery', async () => {
+  let requests = 0;
+  const { app } = await createWebApp(config, {
+    async fetchImplementation(url, options) {
+      requests++;
+      if (requests === 1) throw new Error('Google temporarily unavailable');
+      return googleFetch(url, options);
+    },
+  });
+  assert.equal(requests, 0);
+  const server = await listen(app);
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const browser = new Browser();
+    assert.equal((await browser.request(origin)).status, 200);
+    assert.equal(requests, 0);
+    assert.equal((await browser.request(`${origin}/auth/login`)).status, 503);
+    assert.equal((await browser.request(`${origin}/api/me`)).status, 401);
+    assert.equal((await browser.request(`${origin}/auth/login`)).status, 302);
+    assert.equal((await browser.request(`${origin}/auth/login`)).status, 302);
+    assert.equal(requests, 2, 'Successful discovery should be cached');
+  } finally { await close(server); }
+});
+
+test('HTTPS origins use a Secure session cookie behind a loopback reverse proxy', async () => {
+  const { app } = await createWebApp({ ...config, appUrl: 'https://polka.example' }, { fetchImplementation: googleFetch });
+  const server = await listen(app);
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const response = await new Browser().request(`${origin}/auth/login`, { headers: { 'x-forwarded-proto': 'https' } });
+    assert.equal(response.status, 302);
+    assert.equal(new URL(response.headers.get('location')).searchParams.get('redirect_uri'), 'https://polka.example/auth/callback');
+    const cookie = response.headers.get('set-cookie');
+    assert.match(cookie, /; Secure/);
+    assert.match(cookie, /; HttpOnly/);
+    assert.match(cookie, /; SameSite=Lax/);
+    const insecure = await new Browser().request(`${origin}/auth/login`);
+    assert.equal(insecure.headers.get('set-cookie'), null);
+  } finally { await close(server); }
+});
+
 async function reader(subject) {
-  activeProfile = { ...profile, id: subject };
+  activeProfile = { ...profile, sub: subject };
   const browser = new Browser();
   const { callback } = await begin(browser);
   assert.equal((await browser.request(callback)).status, 302);
@@ -280,7 +371,7 @@ test('personal shelf persists across login and store recreation; concurrent writ
   const expected = { 'little-prince': 'planned', '1984': 'reading', alice: 'read' };
   assert.deepEqual(await (await first.request(`${config.appUrl}/api/shelf`)).json(), { shelf: expected });
   const reopenedStore = new ShelfStore(shelfStore.filename);
-  assert.deepEqual(await reopenedStore.get(shelfUserKey('yandex', 'reader-one')), expected);
+  assert.deepEqual(await reopenedStore.get(shelfUserKey('google', 'reader-one')), expected);
   const nextLogin = await reader('reader-one');
   assert.deepEqual(await (await nextLogin.request(`${config.appUrl}/api/shelf`)).json(), { shelf: expected });
   const other = await reader('reader-two');

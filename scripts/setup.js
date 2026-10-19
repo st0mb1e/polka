@@ -12,7 +12,7 @@ export async function setup() {
   );
   try {
     await writeFile(envPath, contents, { flag: 'wx', mode: 0o600 });
-    console.log('Создан .env. Добавьте YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET для входа через Яндекс.');
+    console.log('Создан .env. Добавьте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET для входа через Google.');
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
     console.log('Используется существующий .env.');

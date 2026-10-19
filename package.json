@@ -2,7 +2,7 @@
   "name": "oauth-lab-auth-app",
   "version": "1.0.0",
   "private": true,
-  "description": "Полка — простой сайт со списком книг и Яндекс OAuth 2.0",
+  "description": "Полка — простой сайт со списком книг и Google OAuth 2.0 / OpenID Connect",
   "type": "module",
   "engines": { "node": ">=22.20.0" },
   "scripts": {

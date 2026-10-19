@@ -15,7 +15,7 @@ function bookCover(book) {
   return `<div class="book-cover tone-${tone}" aria-hidden="true"><span>${escapeHtml(label)}</span></div>`;
 }
 
-export function layout({ title, content, user, csrf, authProvider = 'yandex', identity = false, appUrl = '', current = '' }) {
+export function layout({ title, content, user, csrf, authProvider = 'google', identity = false, appUrl = '', current = '' }) {
   const links = [['/', 'Каталог'], ['/shelf', 'Моя полка'], ['/profile', 'Профиль']];
   const navigation = links.map(([href, label]) => `<a href="${href}"${href === current ? ' aria-current="page"' : ''}>${label}</a>`).join(' ');
   const account = user
@@ -24,7 +24,7 @@ export function layout({ title, content, user, csrf, authProvider = 'yandex', id
           <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
           <button class="secondary" type="submit">Выйти</button>
         </form></div>`
-    : `<a class="button" href="/auth/login?returnTo=%2Fshelf">${authProvider === 'yandex' ? 'Войти через Яндекс' : 'Войти'}</a>`;
+    : `<a class="button" href="/auth/login?returnTo=%2Fshelf">${authProvider === 'google' ? 'Войти через Google' : 'Войти'}</a>`;
   return `<!doctype html>
 <html lang="ru">
 <head>
@@ -49,7 +49,7 @@ export function layout({ title, content, user, csrf, authProvider = 'yandex', id
 </html>`;
 }
 
-export function homePage(user, csrf, loggedOut = false, authProvider = 'yandex', shelf = {}) {
+export function homePage(user, csrf, loggedOut = false, authProvider = 'google', shelf = {}) {
   const items = books.map((book) => {
     const action = !user ? '' : shelf[book.id]
       ? `<span class="status">${statusLabels[shelf[book.id]]}</span><a class="shelf-link" href="/shelf">На моей полке</a>`
@@ -65,7 +65,7 @@ export function homePage(user, csrf, loggedOut = false, authProvider = 'yandex',
     </div></li>`;
   }).join('\n');
   return layout({ title: 'Каталог книг', user, csrf, authProvider, current: '/',
-    content: `${loggedOut ? `<p class="notice" role="status">${authProvider === 'yandex' ? 'Вы вышли из приложения.' : 'Вы вышли из приложения и сервера авторизации.'}</p>` : ''}
+    content: `${loggedOut ? `<p class="notice" role="status">${authProvider === 'google' ? 'Вы вышли из приложения.' : 'Вы вышли из приложения и сервера авторизации.'}</p>` : ''}
       <p class="page-intro">Выбирайте книги и сохраняйте их на свою полку.</p>
       ${user ? '' : '<p class="notice">Чтобы добавлять книги и отмечать прочитанное, войдите в свой аккаунт.</p>'}
       <ul class="book-grid">${items}</ul>`,
